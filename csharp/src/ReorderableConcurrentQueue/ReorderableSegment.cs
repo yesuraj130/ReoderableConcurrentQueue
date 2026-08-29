@@ -28,7 +28,7 @@ namespace ReorderableCollections
         private int _activeSlots;
         private int _tailIndex = -1;
 
-        internal ReorderableSegment<T>(long id, int capacity)
+        internal ReorderableSegment(long id, int capacity)
         {
             Id = id;
             _slots = new IndexSlot<T>[capacity];
