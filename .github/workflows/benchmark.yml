@@ -1,0 +1,60 @@
+name: .NET Performance Benchmarks Regression Tracker
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  # Job 1: Benchmark Suite for Modern .NET 6.0
+  benchmark_net60:
+    name: Run .NET 6.0 Benchmarks (Ubuntu Linux)
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Source Code
+      uses: actions/checkout@v3
+
+    - name: Setup .NET SDK (6.0.x)
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: '6.0.x'
+
+    - name: Restore dependencies
+      run: dotnet restore csharp/ReorderableConcurrentQueue.sln
+
+    - name: Build Benchmarks in Release Mode
+      run: dotnet build csharp/ReorderableConcurrentQueue.sln -c Release --no-restore
+
+    - name: Execute .NET 6.0 Benchmarks
+      run: |
+        dotnet run -c Release --framework net6.0 --project csharp/benchmarks/ReorderableConcurrentQueue.Benchmarks/ReorderableConcurrentQueue.Benchmarks.csproj -- --filter "*" --join
+
+  # Job 2: Benchmark Suite for Legacy .NET Framework 4.8
+  benchmark_net48:
+    name: Run .NET 4.8 Benchmarks (Windows Server)
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout Source Code
+      uses: actions/checkout@v3
+
+    - name: Setup MSBuild and Developer Command Prompt
+      uses: microsoft/setup-msbuild@v1.1
+
+    - name: Setup .NET SDK (6.x & 4.8 developerpack)
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: |
+          6.0.x
+
+    - name: Restore dependencies
+      run: dotnet restore csharp/ReorderableConcurrentQueue.sln
+
+    - name: Build Benchmarks in Release Mode
+      run: dotnet build csharp/ReorderableConcurrentQueue.sln -c Release --no-restore
+
+    - name: Execute .NET Framework 4.8 Benchmarks
+      run: |
+        dotnet run -c Release --framework net48 --project csharp/benchmarks/ReorderableConcurrentQueue.Benchmarks/ReorderableConcurrentQueue.Benchmarks.csproj -- --filter "*" --join
