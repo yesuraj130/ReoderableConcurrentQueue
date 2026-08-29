@@ -7,12 +7,17 @@ using System.Threading;
 
 namespace ReorderableCollections
 {
+    internal static class IntrusiveHelper<T> where T : class
+    {
+        public static readonly bool IsIntrusive = typeof(IHasSlotHandle<T>).IsAssignableFrom(typeof(T));
+    }
+
     public class ReorderableConcurrentQueue<T> : IEnumerable<T> where T : class
     {
         private const int InitialSegmentSize = 32;
-        private const int MaxSegmentSize = 4096;
+        private const int MaxSegmentSize = 1024;
         private static long s_segmentIdCounter;
-        private static readonly bool s_isIntrusive = typeof(IHasSlotHandle<T>).IsAssignableFrom(typeof(T));
+        private static readonly bool s_isIntrusive = IntrusiveHelper<T>.IsIntrusive;
 
         private volatile ReorderableSegment<T> _headSegment;
         private volatile ReorderableSegment<T> _tailSegment;
@@ -93,17 +98,18 @@ namespace ReorderableCollections
                     slot.Item = item;
                     Volatile.Write(ref slot.Sequence, ReorderableSegment<T>.StateReady);
 
-                    if (s_isIntrusive && item is IHasSlotHandle<T> intrusive)
+                    if (s_isIntrusive)
                     {
-                        intrusive.SlotHandle = new SlotHandle<T>(tail, slotIdx);
+                        Unsafe.As<IHasSlotHandle<T>>(item).SlotHandle = new SlotHandle<T>(tail, slotIdx);
                     }
                     return;
                 }
 
                 // Grow segment
-                if (tail._nextSegment != null)
+                var next = tail._nextSegment;
+                if (next != null)
                 {
-                    _tailSegment = tail._nextSegment;
+                    _tailSegment = next;
                 }
                 else
                 {
@@ -135,9 +141,10 @@ namespace ReorderableCollections
 
                 if (headIdx >= tailIdx)
                 {
-                    if (headSeg._nextSegment != null)
+                    var next = headSeg._nextSegment;
+                    if (next != null)
                     {
-                        _headSegment = headSeg._nextSegment;
+                        _headSegment = next;
                         continue;
                     }
                     item = null;
@@ -150,7 +157,7 @@ namespace ReorderableCollections
                 {
                     if (slotIdx > tailIdx)
                     {
-                        while ((tailIdx = Volatile.Read(ref headSeg._tailIndex)) < slotIdx)
+                        while (Volatile.Read(ref headSeg._tailIndex) < slotIdx)
                         {
                             spinner.SpinOnce();
                         }
@@ -158,11 +165,7 @@ namespace ReorderableCollections
 
                     ref var slot = ref headSeg._slots[slotIdx];
 
-                    while (Volatile.Read(ref slot.Sequence) == ReorderableSegment<T>.StateFree)
-                    {
-                        spinner.SpinOnce();
-                    }
-
+                    // Direct CAS claim: fast path for ready slot
                     int seq = Interlocked.CompareExchange(
                         ref slot.Sequence,
                         ReorderableSegment<T>.StateClaimed,
@@ -173,12 +176,50 @@ namespace ReorderableCollections
                         item = slot.Item;
                         slot.Item = null;
 
-                        if (slotIdx == headSeg.Capacity - 1 && headSeg._nextSegment != null)
+                        if (slotIdx == headSeg.Capacity - 1)
                         {
-                            _headSegment = headSeg._nextSegment;
+                            var next = headSeg._nextSegment;
+                            if (next != null)
+                            {
+                                _headSegment = next;
+                            }
                         }
 
                         return true;
+                    }
+
+                    if (seq == ReorderableSegment<T>.StateFree)
+                    {
+                        while (true)
+                        {
+                            spinner.SpinOnce();
+                            seq = Interlocked.CompareExchange(
+                                ref slot.Sequence,
+                                ReorderableSegment<T>.StateClaimed,
+                                ReorderableSegment<T>.StateReady);
+
+                            if (seq == ReorderableSegment<T>.StateReady)
+                            {
+                                item = slot.Item;
+                                slot.Item = null;
+
+                                if (slotIdx == headSeg.Capacity - 1)
+                                {
+                                    var next = headSeg._nextSegment;
+                                    if (next != null)
+                                    {
+                                        _headSegment = next;
+                                    }
+                                }
+
+                                return true;
+                            }
+
+                            if (seq == ReorderableSegment<T>.StateLockedReorder)
+                            {
+                                break;
+                            }
+                        }
                     }
 
                     if (seq == ReorderableSegment<T>.StateLockedReorder)
@@ -198,9 +239,10 @@ namespace ReorderableCollections
                 }
                 else
                 {
-                    if (headSeg._nextSegment != null)
+                    var next = headSeg._nextSegment;
+                    if (next != null)
                     {
-                        _headSegment = headSeg._nextSegment;
+                        _headSegment = next;
                         continue;
                     }
                     item = null;
@@ -217,10 +259,10 @@ namespace ReorderableCollections
             SlotHandle<T> srcHandle = default;
             SlotHandle<T> destHandle = default;
 
-            if (s_isIntrusive && sourceItem is IHasSlotHandle<T> srcHas && targetDestination is IHasSlotHandle<T> destHas)
+            if (s_isIntrusive)
             {
-                srcHandle = srcHas.SlotHandle;
-                destHandle = destHas.SlotHandle;
+                srcHandle = Unsafe.As<IHasSlotHandle<T>>(sourceItem).SlotHandle;
+                destHandle = Unsafe.As<IHasSlotHandle<T>>(targetDestination).SlotHandle;
             }
             else
             {
@@ -283,10 +325,10 @@ namespace ReorderableCollections
                 destSlot.Item = sourceItem;
 
                 // Swap handles for intrusive items
-                if (s_isIntrusive && sourceItem is IHasSlotHandle<T> srcItem && targetDestination is IHasSlotHandle<T> destItem)
+                if (s_isIntrusive)
                 {
-                    srcItem.SlotHandle = destHandle;
-                    destItem.SlotHandle = srcHandle;
+                    Unsafe.As<IHasSlotHandle<T>>(sourceItem).SlotHandle = destHandle;
+                    Unsafe.As<IHasSlotHandle<T>>(targetDestination).SlotHandle = srcHandle;
                 }
 
                 return true;

@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -24,6 +25,10 @@ namespace ReorderableCollections
         internal volatile ReorderableSegment<T>? _nextSegment;
 
         internal int _tailIndex = -1;
+
+        // Cache line padding (56 bytes) to isolate _tailIndex and _headIndex across cores
+        private long _pad0, _pad1, _pad2, _pad3, _pad4, _pad5, _pad6;
+
         internal int _headIndex = -1;
 
         internal ReorderableSegment(long id, int capacity)
@@ -33,6 +38,7 @@ namespace ReorderableCollections
             _slots = new IndexSlot<T>[capacity];
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal SlotHandle<T> GetHandle(int slotIdx)
         {
             return new SlotHandle<T>(this, slotIdx);
