@@ -332,10 +332,10 @@ namespace ReorderableCollections
                 int tailLimit = Math.Min(curSeg.Capacity, Volatile.Read(ref curSeg._tailIndex) + 1);
                 for (int i = 0; i < tailLimit; i++)
                 {
-                    ref var slot = ref curSeg._slots[i];
-                    if (slot.Item != null && Volatile.Read(ref slot.Sequence) == ReorderableSegment<T>.StateReady)
+                    var item = curSeg._slots[i].Item;
+                    if (item != null && Volatile.Read(ref curSeg._slots[i].Sequence) == ReorderableSegment<T>.StateReady)
                     {
-                        yield return slot.Item;
+                        yield return item;
                     }
                 }
                 curSeg = curSeg._nextSegment;
