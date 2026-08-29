@@ -8,8 +8,10 @@ namespace ReorderableCollections
 {
     public class ReorderableConcurrentQueue<T> : IEnumerable<T> where T : class
     {
-        private const int SegmentSize = 1024; // 2^10
+        private const int InitialSegmentSize = 32;
+        private const int MaxSegmentSize = 4096;
         private static long s_segmentIdCounter;
+        private static readonly bool s_isIntrusive = typeof(IHasSlotHandle<T>).IsAssignableFrom(typeof(T));
 
         private volatile ReorderableSegment<T> _headSegment;
         private volatile ReorderableSegment<T> _tailSegment;
@@ -19,13 +21,13 @@ namespace ReorderableCollections
 
         // Fallback directory if T does not implement IHasSlotHandle<T>
         private readonly ConcurrentDictionary<T, SlotHandle<T>> _directory = 
-            new ConcurrentDictionary<T, SlotHandle<T>>();
+            s_isIntrusive ? null : new ConcurrentDictionary<T, SlotHandle<T>>(Environment.ProcessorCount * 2, 64);
 
         private int _count;
 
         public ReorderableConcurrentQueue()
         {
-            var initial = new ReorderableSegment<T>(Interlocked.Increment(ref s_segmentIdCounter), SegmentSize);
+            var initial = new ReorderableSegment<T>(Interlocked.Increment(ref s_segmentIdCounter), InitialSegmentSize);
             _headSegment = initial;
             _tailSegment = initial;
         }
@@ -71,9 +73,9 @@ namespace ReorderableCollections
                     Volatile.Write(ref slot.State, ReorderableSegment<T>.StateReady);
 
                     // Zero-Allocation Hybrid mode: bypass directory entirely if interface is implemented!
-                    if (item is IHasSlotHandle<T> reorderable)
+                    if (s_isIntrusive)
                     {
-                        reorderable.SlotHandle = currentHandle;
+                        ((IHasSlotHandle<T>)item).SlotHandle = currentHandle;
                     }
                     else
                     {
@@ -84,15 +86,23 @@ namespace ReorderableCollections
                     return;
                 }
 
-                // Grow segment
-                lock (tail)
+                // Grow segment dynamically
+                if (tail._nextSegment != null)
                 {
-                    if (tail._nextSegment == null)
+                    _tailSegment = tail._nextSegment;
+                }
+                else
+                {
+                    lock (tail)
                     {
-                        var newSeg = new ReorderableSegment<T>(
-                            Interlocked.Increment(ref s_segmentIdCounter), SegmentSize);
-                        tail._nextSegment = newSeg;
-                        _tailSegment = newSeg;
+                        if (tail._nextSegment == null)
+                        {
+                            int nextCapacity = Math.Min(MaxSegmentSize, tail.Capacity * 2);
+                            var newSeg = new ReorderableSegment<T>(
+                                Interlocked.Increment(ref s_segmentIdCounter), nextCapacity);
+                            tail._nextSegment = newSeg;
+                            _tailSegment = newSeg;
+                        }
                     }
                 }
             }
@@ -105,7 +115,7 @@ namespace ReorderableCollections
             while (true)
             {
                 var head = Volatile.Read(ref _logicalHead);
-                if (head == null || head.IsNull || Count == 0)
+                if (head == null || head.IsNull || Volatile.Read(ref _count) <= 0)
                 {
                     item = null;
                     return false;
@@ -122,9 +132,9 @@ namespace ReorderableCollections
                     item = slot.Item;
                     slot.Item = null;
 
-                    if (item is IHasSlotHandle<T> reorderable)
+                    if (s_isIntrusive)
                     {
-                        reorderable.SlotHandle = SlotHandle<T>.Null;
+                        ((IHasSlotHandle<T>)item).SlotHandle = SlotHandle<T>.Null;
                     }
                     else
                     {
@@ -179,21 +189,14 @@ namespace ReorderableCollections
             SlotHandle<T> srcHandle;
             SlotHandle<T> destHandle;
 
-            if (sourceItem is IHasSlotHandle<T> srcReorderable)
+            if (s_isIntrusive)
             {
-                srcHandle = srcReorderable.SlotHandle;
+                srcHandle = ((IHasSlotHandle<T>)sourceItem).SlotHandle;
+                destHandle = ((IHasSlotHandle<T>)targetDestination).SlotHandle;
             }
             else
             {
                 if (!_directory.TryGetValue(sourceItem, out srcHandle)) return false;
-            }
-
-            if (targetDestination is IHasSlotHandle<T> destReorderable)
-            {
-                destHandle = destReorderable.SlotHandle;
-            }
-            else
-            {
                 if (!_directory.TryGetValue(targetDestination, out destHandle)) return false;
             }
 
