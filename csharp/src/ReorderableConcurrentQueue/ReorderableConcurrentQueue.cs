@@ -113,16 +113,16 @@ namespace ReorderableCollections
                 }
                 else
                 {
-                    lock (tail)
+                    int nextCapacity = Math.Min(MaxSegmentSize, tail.Capacity * 2);
+                    var newSeg = new ReorderableSegment<T>(
+                        Interlocked.Increment(ref s_segmentIdCounter), nextCapacity);
+                    if (Interlocked.CompareExchange(ref tail._nextSegment, newSeg, null) == null)
                     {
-                        if (tail._nextSegment == null)
-                        {
-                            int nextCapacity = Math.Min(MaxSegmentSize, tail.Capacity * 2);
-                            var newSeg = new ReorderableSegment<T>(
-                                Interlocked.Increment(ref s_segmentIdCounter), nextCapacity);
-                            tail._nextSegment = newSeg;
-                            _tailSegment = newSeg;
-                        }
+                        _tailSegment = newSeg;
+                    }
+                    else
+                    {
+                        _tailSegment = tail._nextSegment;
                     }
                 }
             }
@@ -251,6 +251,7 @@ namespace ReorderableCollections
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool TryMoveBefore(T sourceItem, T targetDestination)
         {
             if (sourceItem == null || targetDestination == null || ReferenceEquals(sourceItem, targetDestination))
@@ -315,29 +316,27 @@ namespace ReorderableCollections
                 return false;
             }
 
-            try
-            {
-                if (!ReferenceEquals(srcSlot.Item, sourceItem) || !ReferenceEquals(destSlot.Item, targetDestination))
-                    return false;
-
-                // Swap items in slots
-                srcSlot.Item = targetDestination;
-                destSlot.Item = sourceItem;
-
-                // Swap handles for intrusive items
-                if (s_isIntrusive)
-                {
-                    Unsafe.As<IHasSlotHandle<T>>(sourceItem).SlotHandle = destHandle;
-                    Unsafe.As<IHasSlotHandle<T>>(targetDestination).SlotHandle = srcHandle;
-                }
-
-                return true;
-            }
-            finally
+            if (!ReferenceEquals(srcSlot.Item, sourceItem) || !ReferenceEquals(destSlot.Item, targetDestination))
             {
                 Volatile.Write(ref secondSlot.Sequence, ReorderableSegment<T>.StateReady);
                 Volatile.Write(ref firstSlot.Sequence, ReorderableSegment<T>.StateReady);
+                return false;
             }
+
+            // Swap items in slots
+            srcSlot.Item = targetDestination;
+            destSlot.Item = sourceItem;
+
+            // Swap handles for intrusive items
+            if (s_isIntrusive)
+            {
+                Unsafe.As<IHasSlotHandle<T>>(sourceItem).SlotHandle = destHandle;
+                Unsafe.As<IHasSlotHandle<T>>(targetDestination).SlotHandle = srcHandle;
+            }
+
+            Volatile.Write(ref secondSlot.Sequence, ReorderableSegment<T>.StateReady);
+            Volatile.Write(ref firstSlot.Sequence, ReorderableSegment<T>.StateReady);
+            return true;
         }
 
         public IEnumerator<T> GetEnumerator()
