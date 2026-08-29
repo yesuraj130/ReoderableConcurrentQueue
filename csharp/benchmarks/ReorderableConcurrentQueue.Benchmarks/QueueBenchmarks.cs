@@ -4,12 +4,27 @@ using ReorderableCollections;
 
 namespace Benchmarks
 {
+    public sealed class QueueTaskItem : IHasSlotHandle<QueueTaskItem>
+    {
+        public int Id { get; }
+        public SlotHandle<QueueTaskItem> SlotHandle { get; set; }
+
+        public QueueTaskItem(int id)
+        {
+            Id = id;
+        }
+    }
+
     [MemoryDiagnoser]
     public class QueueBenchmarks
     {
-        private ConcurrentQueue<string> _stdQueue;
-        private ReorderableConcurrentQueue<string> _reorderQueue;
-        private string[] _testPayloads;
+        private ConcurrentQueue<QueueTaskItem> _stdQueue;
+        private ReorderableConcurrentQueue<QueueTaskItem> _reorderQueue;
+        private QueueTaskItem[] _testItems;
+
+        private ConcurrentQueue<string> _stdStringQueue;
+        private ReorderableConcurrentQueue<string> _reorderStringQueue;
+        private string[] _testStrings;
 
         [Params(1000, 10000)]
         public int OperationsCount;
@@ -17,51 +32,81 @@ namespace Benchmarks
         [GlobalSetup]
         public void Setup()
         {
-            _testPayloads = new string[OperationsCount];
+            _testItems = new QueueTaskItem[OperationsCount];
+            _testStrings = new string[OperationsCount];
             for (int i = 0; i < OperationsCount; i++)
             {
-                _testPayloads[i] = "Payload_" + i;
+                _testItems[i] = new QueueTaskItem(i);
+                _testStrings[i] = "Payload_" + i;
             }
         }
 
         [IterationSetup]
         public void IterationSetup()
         {
-            _stdQueue = new ConcurrentQueue<string>();
-            _reorderQueue = new ReorderableConcurrentQueue<string>();
+            _stdQueue = new ConcurrentQueue<QueueTaskItem>();
+            _reorderQueue = new ReorderableConcurrentQueue<QueueTaskItem>();
+
+            _stdStringQueue = new ConcurrentQueue<string>();
+            _reorderStringQueue = new ReorderableConcurrentQueue<string>();
         }
 
+        // --- Intrusive Object Benchmarks (Zero-Alloc / Direct Handle Access) ---
+
         [Benchmark(Baseline = true)]
-        public void Standard_ConcurrentQueue_EnqueueDequeue()
+        public void Standard_IntrusiveItem_EnqueueDequeue()
         {
             for (int i = 0; i < OperationsCount; i++)
-                _stdQueue.Enqueue(_testPayloads[i]);
+                _stdQueue.Enqueue(_testItems[i]);
 
             for (int i = 0; i < OperationsCount; i++)
                 _stdQueue.TryDequeue(out _);
         }
 
         [Benchmark]
-        public void Reorderable_EnqueueDequeue()
+        public void Reorderable_IntrusiveItem_EnqueueDequeue()
         {
             for (int i = 0; i < OperationsCount; i++)
-                _reorderQueue.Enqueue(_testPayloads[i]);
+                _reorderQueue.Enqueue(_testItems[i]);
 
             for (int i = 0; i < OperationsCount; i++)
                 _reorderQueue.TryDequeue(out _);
         }
 
         [Benchmark]
-        public void Reorderable_InFlight_Reorder()
+        public void Reorderable_IntrusiveItem_InFlight_Reorder()
         {
             for (int i = 0; i < OperationsCount; i++)
-                _reorderQueue.Enqueue(_testPayloads[i]);
+                _reorderQueue.Enqueue(_testItems[i]);
 
-            // Reorder mid-queue element to front
-            _reorderQueue.TryMoveBefore(_testPayloads[OperationsCount / 2], _testPayloads[0]);
+            // Reorder mid-queue element to front using intrusive SlotHandle
+            _reorderQueue.TryMoveBefore(_testItems[OperationsCount / 2], _testItems[0]);
 
             for (int i = 0; i < OperationsCount; i++)
                 _reorderQueue.TryDequeue(out _);
         }
+
+        // --- Non-Intrusive Sealed String Benchmarks (Directory Fallback) ---
+
+        [Benchmark]
+        public void Standard_String_EnqueueDequeue()
+        {
+            for (int i = 0; i < OperationsCount; i++)
+                _stdStringQueue.Enqueue(_testStrings[i]);
+
+            for (int i = 0; i < OperationsCount; i++)
+                _stdStringQueue.TryDequeue(out _);
+        }
+
+        [Benchmark]
+        public void Reorderable_String_EnqueueDequeue()
+        {
+            for (int i = 0; i < OperationsCount; i++)
+                _reorderStringQueue.Enqueue(_testStrings[i]);
+
+            for (int i = 0; i < OperationsCount; i++)
+                _reorderStringQueue.TryDequeue(out _);
+        }
     }
 }
+
