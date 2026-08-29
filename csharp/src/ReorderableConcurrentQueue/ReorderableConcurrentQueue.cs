@@ -16,13 +16,6 @@ namespace ReorderableCollections
         private volatile ReorderableSegment<T> _headSegment;
         private volatile ReorderableSegment<T> _tailSegment;
 
-        private SlotHandle<T> _logicalHead = SlotHandle<T>.Null;
-        private SlotHandle<T> _logicalTail = SlotHandle<T>.Null;
-
-        // Fallback directory if T does not implement IHasSlotHandle<T>
-        private readonly ConcurrentDictionary<T, SlotHandle<T>> _directory = 
-            s_isIntrusive ? null : new ConcurrentDictionary<T, SlotHandle<T>>(Environment.ProcessorCount * 2, 64);
-
         private int _count;
 
         public ReorderableConcurrentQueue()
@@ -45,41 +38,16 @@ namespace ReorderableCollections
                 if (tail.TryAllocateSlot(out int slotIdx))
                 {
                     ref var slot = ref tail._slots[slotIdx];
-                    var currentHandle = tail._handles[slotIdx];
-
                     slot.Item = item;
-                    slot.Next = SlotHandle<T>.Null;
+                    slot.NextSlot = -1;
+                    slot.NextSegment = null;
+                    slot.PrevSlot = -1;
+                    slot.PrevSegment = null;
+                    Volatile.Write(ref slot.Sequence, ReorderableSegment<T>.StateReady);
 
-                    // Lock-Free atomic sequence wiring using CompareExchange loop
-                    while (true)
-                    {
-                        var prevTail = Volatile.Read(ref _logicalTail);
-                        slot.Prev = prevTail;
-                        if (Interlocked.CompareExchange(ref _logicalTail, currentHandle, prevTail) == prevTail)
-                        {
-                            if (prevTail == null || prevTail.IsNull)
-                            {
-                                _logicalHead = currentHandle;
-                            }
-                            else
-                            {
-                                ref var prevSlot = ref prevTail.Segment._slots[prevTail.SlotIndex];
-                                prevSlot.Next = currentHandle;
-                            }
-                            break;
-                        }
-                    }
-
-                    Volatile.Write(ref slot.State, ReorderableSegment<T>.StateReady);
-
-                    // Zero-Allocation Hybrid mode: bypass directory entirely if interface is implemented!
                     if (s_isIntrusive)
                     {
-                        ((IHasSlotHandle<T>)item).SlotHandle = currentHandle;
-                    }
-                    else
-                    {
-                        _directory[item] = currentHandle;
+                        ((IHasSlotHandle<T>)item).SlotHandle = tail.GetHandle(slotIdx);
                     }
 
                     Interlocked.Increment(ref _count);
@@ -100,6 +68,7 @@ namespace ReorderableCollections
                             int nextCapacity = Math.Min(MaxSegmentSize, tail.Capacity * 2);
                             var newSeg = new ReorderableSegment<T>(
                                 Interlocked.Increment(ref s_segmentIdCounter), nextCapacity);
+                            newSeg._prevSegment = tail;
                             tail._nextSegment = newSeg;
                             _tailSegment = newSeg;
                         }
@@ -114,71 +83,141 @@ namespace ReorderableCollections
 
             while (true)
             {
-                var head = Volatile.Read(ref _logicalHead);
-                if (head == null || head.IsNull || Volatile.Read(ref _count) <= 0)
+                if (Volatile.Read(ref _count) <= 0)
                 {
                     item = null;
                     return false;
                 }
 
-                ref var slot = ref head.Segment._slots[head.SlotIndex];
-                int state = Interlocked.CompareExchange(
-                    ref slot.State, 
-                    ReorderableSegment<T>.StateClaimed, 
-                    ReorderableSegment<T>.StateReady);
+                var headSeg = _headSegment;
 
-                if (state == ReorderableSegment<T>.StateReady)
+                // Fast-Path (Single-CAS ring dequeue for non-reordered streams)
+                if (!headSeg._hasReordered)
                 {
-                    item = slot.Item;
-                    slot.Item = null;
-
-                    if (s_isIntrusive)
+                    int slotIdx = Interlocked.Increment(ref headSeg._headIndex);
+                    if (slotIdx < headSeg.Capacity)
                     {
-                        ((IHasSlotHandle<T>)item).SlotHandle = SlotHandle<T>.Null;
+                        ref var slot = ref headSeg._slots[slotIdx];
+
+                        while (Volatile.Read(ref slot.Sequence) == ReorderableSegment<T>.StateFree)
+                        {
+                            spinner.SpinOnce();
+                        }
+
+                        int seq = Interlocked.CompareExchange(
+                            ref slot.Sequence,
+                            ReorderableSegment<T>.StateClaimed,
+                            ReorderableSegment<T>.StateReady);
+
+                        if (seq == ReorderableSegment<T>.StateReady)
+                        {
+                            item = slot.Item;
+                            slot.Item = null;
+
+                            if (s_isIntrusive && item is IHasSlotHandle<T> reorderable)
+                            {
+                                reorderable.SlotHandle = SlotHandle<T>.Null;
+                            }
+
+                            headSeg.OnSlotFreed();
+                            Interlocked.Decrement(ref _count);
+
+                            if (slotIdx == headSeg.Capacity - 1 && headSeg._nextSegment != null)
+                            {
+                                _headSegment = headSeg._nextSegment;
+                            }
+
+                            return true;
+                        }
+
+                        if (seq == ReorderableSegment<T>.StateLockedReorder)
+                        {
+                            spinner.SpinOnce();
+                            continue;
+                        }
                     }
                     else
                     {
-                        _directory.TryRemove(item, out _);
-                    }
-
-                    // Lock-Free logical head advancement using CAS exchange
-                    var nextHandle = slot.Next;
-                    if (Interlocked.CompareExchange(ref _logicalHead, nextHandle, head) == head)
-                    {
-                        if (nextHandle != null && !nextHandle.IsNull)
+                        if (headSeg._nextSegment != null)
                         {
-                            ref var nextSlot = ref nextHandle.Segment._slots[nextHandle.SlotIndex];
-                            nextSlot.Prev = SlotHandle<T>.Null;
+                            _headSegment = headSeg._nextSegment;
+                            continue;
                         }
-                        else
-                        {
-                            Interlocked.CompareExchange(ref _logicalTail, SlotHandle<T>.Null, head);
-                        }
+                        item = null;
+                        return false;
                     }
-
-                    slot.Next = SlotHandle<T>.Null;
-                    slot.Prev = SlotHandle<T>.Null;
-                    Volatile.Write(ref slot.State, ReorderableSegment<T>.StateFree);
-
-                    head.Segment.OnSlotFreed();
-                    Interlocked.Decrement(ref _count);
-
-                    if (head.Segment.IsEmpty && head.Segment._nextSegment != null)
-                    {
-                        _headSegment = head.Segment._nextSegment;
-                    }
-
-                    return true;
                 }
-
-                if (state == ReorderableSegment<T>.StateLockedReorder)
+                else
                 {
-                    spinner.SpinOnce();
-                    continue;
+                    // Reordered Dequeue Path
+                    if (TryDequeueReordered(headSeg, out item))
+                    {
+                        return true;
+                    }
+                    
+                    if (headSeg.IsEmpty && headSeg._nextSegment != null)
+                    {
+                        _headSegment = headSeg._nextSegment;
+                        continue;
+                    }
+                    
+                    item = null;
+                    return false;
                 }
-
-                spinner.SpinOnce();
             }
+        }
+
+        private bool TryDequeueReordered(ReorderableSegment<T> segment, out T item)
+        {
+            var spinner = new SpinWait();
+            int tailLimit = Math.Min(segment.Capacity, Volatile.Read(ref segment._tailIndex) + 1);
+
+            for (int i = 0; i < tailLimit; i++)
+            {
+                ref var slot = ref segment._slots[i];
+                if (Volatile.Read(ref slot.Sequence) == ReorderableSegment<T>.StateReady && slot.Item != null)
+                {
+                    // Check if this slot has a predecessor that should be dequeued before it
+                    if (slot.PrevSlot >= 0 && slot.PrevSegment != null)
+                    {
+                        ref var prevSlot = ref slot.PrevSegment._slots[slot.PrevSlot];
+                        if (Volatile.Read(ref prevSlot.Sequence) == ReorderableSegment<T>.StateReady && prevSlot.Item != null)
+                        {
+                            // Predecessor takes priority, dequeue predecessor first
+                            continue;
+                        }
+                    }
+
+                    int seq = Interlocked.CompareExchange(
+                        ref slot.Sequence,
+                        ReorderableSegment<T>.StateClaimed,
+                        ReorderableSegment<T>.StateReady);
+
+                    if (seq == ReorderableSegment<T>.StateReady)
+                    {
+                        item = slot.Item;
+                        slot.Item = null;
+
+                        if (s_isIntrusive && item is IHasSlotHandle<T> reorderable)
+                        {
+                            reorderable.SlotHandle = SlotHandle<T>.Null;
+                        }
+
+                        segment.OnSlotFreed();
+                        Interlocked.Decrement(ref _count);
+                        return true;
+                    }
+                }
+            }
+
+            // Fallback scan across next segments if this segment is exhausted
+            if (segment._nextSegment != null)
+            {
+                return TryDequeueReordered(segment._nextSegment, out item);
+            }
+
+            item = null;
+            return false;
         }
 
         public bool TryMoveBefore(T sourceItem, T targetDestination)
@@ -186,8 +225,8 @@ namespace ReorderableCollections
             if (sourceItem == null || targetDestination == null || ReferenceEquals(sourceItem, targetDestination))
                 return false;
 
-            SlotHandle<T> srcHandle;
-            SlotHandle<T> destHandle;
+            SlotHandle<T> srcHandle = null;
+            SlotHandle<T> destHandle = null;
 
             if (s_isIntrusive)
             {
@@ -196,72 +235,114 @@ namespace ReorderableCollections
             }
             else
             {
-                if (!_directory.TryGetValue(sourceItem, out srcHandle)) return false;
-                if (!_directory.TryGetValue(targetDestination, out destHandle)) return false;
+                // Find items in active segments
+                var curSeg = _headSegment;
+                while (curSeg != null && (srcHandle == null || destHandle == null))
+                {
+                    int tailLimit = Math.Min(curSeg.Capacity, Volatile.Read(ref curSeg._tailIndex) + 1);
+                    for (int i = 0; i < tailLimit; i++)
+                    {
+                        ref var slot = ref curSeg._slots[i];
+                        if (slot.Item != null && Volatile.Read(ref slot.Sequence) == ReorderableSegment<T>.StateReady)
+                        {
+                            if (srcHandle == null && ReferenceEquals(slot.Item, sourceItem))
+                            {
+                                srcHandle = curSeg.GetHandle(i);
+                            }
+                            else if (destHandle == null && ReferenceEquals(slot.Item, targetDestination))
+                            {
+                                destHandle = curSeg.GetHandle(i);
+                            }
+                        }
+                    }
+                    curSeg = curSeg._nextSegment;
+                }
             }
 
-            if (srcHandle == null || destHandle == null || srcHandle.IsNull || destHandle.IsNull) return false;
+            if (srcHandle == null || destHandle == null || srcHandle.IsNull || destHandle.IsNull)
+                return false;
 
-            // Ordered lock acquisition keys to guarantee deadlock freedom
+            srcHandle.Segment._hasReordered = true;
+            destHandle.Segment._hasReordered = true;
+
             long keySrc = (srcHandle.Segment.Id << 32) | (uint)srcHandle.SlotIndex;
             long keyDest = (destHandle.Segment.Id << 32) | (uint)destHandle.SlotIndex;
 
             ref var srcSlot = ref srcHandle.Segment._slots[srcHandle.SlotIndex];
             ref var destSlot = ref destHandle.Segment._slots[destHandle.SlotIndex];
 
-            // Canonical lock acquisition
             ref var firstSlot = ref (keySrc < keyDest ? ref srcSlot : ref destSlot);
             ref var secondSlot = ref (keySrc < keyDest ? ref destSlot : ref srcSlot);
 
-            if (Interlocked.CompareExchange(ref firstSlot.State, ReorderableSegment<T>.StateLockedReorder, ReorderableSegment<T>.StateReady) != ReorderableSegment<T>.StateReady)
+            if (Interlocked.CompareExchange(ref firstSlot.Sequence, ReorderableSegment<T>.StateLockedReorder, ReorderableSegment<T>.StateReady) != ReorderableSegment<T>.StateReady)
                 return false;
 
-            if (Interlocked.CompareExchange(ref secondSlot.State, ReorderableSegment<T>.StateLockedReorder, ReorderableSegment<T>.StateReady) != ReorderableSegment<T>.StateReady)
+            if (Interlocked.CompareExchange(ref secondSlot.Sequence, ReorderableSegment<T>.StateLockedReorder, ReorderableSegment<T>.StateReady) != ReorderableSegment<T>.StateReady)
             {
-                Volatile.Write(ref firstSlot.State, ReorderableSegment<T>.StateReady);
+                Volatile.Write(ref firstSlot.Sequence, ReorderableSegment<T>.StateReady);
                 return false;
             }
 
             try
             {
-                var prevSrc = srcSlot.Prev;
-                var nextSrc = srcSlot.Next;
+                // Splice source out of existing custom links
+                if (srcSlot.PrevSlot >= 0 && srcSlot.PrevSegment != null)
+                {
+                    ref var prev = ref srcSlot.PrevSegment._slots[srcSlot.PrevSlot];
+                    prev.NextSlot = srcSlot.NextSlot;
+                    prev.NextSegment = srcSlot.NextSegment;
+                }
+                if (srcSlot.NextSlot >= 0 && srcSlot.NextSegment != null)
+                {
+                    ref var next = ref srcSlot.NextSegment._slots[srcSlot.NextSlot];
+                    next.PrevSlot = srcSlot.PrevSlot;
+                    next.PrevSegment = srcSlot.PrevSegment;
+                }
 
-                if (prevSrc != null && !prevSrc.IsNull) prevSrc.Segment._slots[prevSrc.SlotIndex].Next = nextSrc;
-                if (nextSrc != null && !nextSrc.IsNull) nextSrc.Segment._slots[nextSrc.SlotIndex].Prev = prevSrc;
+                // Splice source before target
+                srcSlot.NextSlot = destHandle.SlotIndex;
+                srcSlot.NextSegment = destHandle.Segment;
+                srcSlot.PrevSlot = destSlot.PrevSlot;
+                srcSlot.PrevSegment = destSlot.PrevSegment;
 
-                if (Equals(_logicalHead, srcHandle)) _logicalHead = nextSrc;
-                if (Equals(_logicalTail, srcHandle)) _logicalTail = prevSrc;
+                if (destSlot.PrevSlot >= 0 && destSlot.PrevSegment != null)
+                {
+                    ref var prevDest = ref destSlot.PrevSegment._slots[destSlot.PrevSlot];
+                    prevDest.NextSlot = srcHandle.SlotIndex;
+                    prevDest.NextSegment = srcHandle.Segment;
+                }
 
-                var prevDest = destSlot.Prev;
-
-                if (prevDest != null && !prevDest.IsNull) prevDest.Segment._slots[prevDest.SlotIndex].Next = srcHandle;
-                srcSlot.Prev = prevDest;
-                srcSlot.Next = destHandle;
-                destSlot.Prev = srcHandle;
-
-                if (Equals(_logicalHead, destHandle)) _logicalHead = srcHandle;
+                destSlot.PrevSlot = srcHandle.SlotIndex;
+                destSlot.PrevSegment = srcHandle.Segment;
 
                 return true;
             }
             finally
             {
-                Volatile.Write(ref secondSlot.State, ReorderableSegment<T>.StateReady);
-                Volatile.Write(ref firstSlot.State, ReorderableSegment<T>.StateReady);
+                Volatile.Write(ref secondSlot.Sequence, ReorderableSegment<T>.StateReady);
+                Volatile.Write(ref firstSlot.Sequence, ReorderableSegment<T>.StateReady);
             }
         }
 
         public IEnumerator<T> GetEnumerator()
         {
-            var current = Volatile.Read(ref _logicalHead);
-            while (current != null && !current.IsNull)
+            var curSeg = _headSegment;
+            while (curSeg != null)
             {
-                var item = current.Segment._slots[current.SlotIndex].Item;
-                if (item != null) yield return item;
-                current = current.Segment._slots[current.SlotIndex].Next;
+                int tailLimit = Math.Min(curSeg.Capacity, Volatile.Read(ref curSeg._tailIndex) + 1);
+                for (int i = 0; i < tailLimit; i++)
+                {
+                    ref var slot = ref curSeg._slots[i];
+                    if (slot.Item != null && Volatile.Read(ref slot.Sequence) == ReorderableSegment<T>.StateReady)
+                    {
+                        yield return slot.Item;
+                    }
+                }
+                curSeg = curSeg._nextSegment;
             }
         }
 
         IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
     }
 }
+

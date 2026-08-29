@@ -29,3 +29,4 @@ namespace ReorderableCollections
             (Segment != null ? Segment.Id.GetHashCode() : 0) ^ SlotIndex;
     }
 }
+
