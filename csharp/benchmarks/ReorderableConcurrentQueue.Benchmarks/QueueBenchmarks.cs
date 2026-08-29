@@ -1,12 +1,9 @@
 using System.Collections.Concurrent;
 using BenchmarkDotNet.Attributes;
-using BenchmarkDotNet.Jobs;
 using ReorderableCollections;
 
 namespace Benchmarks
 {
-    [SimpleJob(RuntimeMoniker.Net60)]
-    [SimpleJob(RuntimeMoniker.Net48)]
     [MemoryDiagnoser]
     public class QueueBenchmarks
     {

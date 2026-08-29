@@ -1,10 +1,8 @@
 using System;
-using System.Runtime.InteropServices;
 
 namespace ReorderableCollections
 {
-    [StructLayout(LayoutKind.Sequential)]
-    public struct SlotHandle<T> : IEquatable<SlotHandle<T>>
+    public sealed class SlotHandle<T> : IEquatable<SlotHandle<T>> where T : class
     {
         internal readonly ReorderableSegment<T> Segment;
         internal readonly int SlotIndex;
@@ -15,11 +13,14 @@ namespace ReorderableCollections
             SlotIndex = slotIndex;
         }
 
-        public static SlotHandle<T> Null => new SlotHandle<T>(null, -1);
+        public static SlotHandle<T> Null => null;
         public bool IsNull => Segment == null || SlotIndex < 0;
 
-        public bool Equals(SlotHandle<T> other) =>
-            ReferenceEquals(Segment, other.Segment) && SlotIndex == other.SlotIndex;
+        public bool Equals(SlotHandle<T> other)
+        {
+            if (ReferenceEquals(other, null)) return false;
+            return ReferenceEquals(Segment, other.Segment) && SlotIndex == other.SlotIndex;
+        }
 
         public override bool Equals(object obj) =>
             obj is SlotHandle<T> other && Equals(other);

@@ -43,7 +43,7 @@ namespace ReorderableCollections
                 if (tail.TryAllocateSlot(out int slotIdx))
                 {
                     ref var slot = ref tail._slots[slotIdx];
-                    var currentHandle = new SlotHandle<T>(tail, slotIdx);
+                    var currentHandle = tail._handles[slotIdx];
 
                     slot.Item = item;
                     slot.Next = SlotHandle<T>.Null;
@@ -55,7 +55,7 @@ namespace ReorderableCollections
                         slot.Prev = prevTail;
                         if (Interlocked.CompareExchange(ref _logicalTail, currentHandle, prevTail) == prevTail)
                         {
-                            if (prevTail.IsNull)
+                            if (prevTail == null || prevTail.IsNull)
                             {
                                 _logicalHead = currentHandle;
                             }
@@ -104,8 +104,8 @@ namespace ReorderableCollections
 
             while (true)
             {
-                var head = _logicalHead;
-                if (head.IsNull || Count == 0)
+                var head = Volatile.Read(ref _logicalHead);
+                if (head == null || head.IsNull || Count == 0)
                 {
                     item = null;
                     return false;
@@ -135,7 +135,7 @@ namespace ReorderableCollections
                     var nextHandle = slot.Next;
                     if (Interlocked.CompareExchange(ref _logicalHead, nextHandle, head) == head)
                     {
-                        if (!nextHandle.IsNull)
+                        if (nextHandle != null && !nextHandle.IsNull)
                         {
                             ref var nextSlot = ref nextHandle.Segment._slots[nextHandle.SlotIndex];
                             nextSlot.Prev = SlotHandle<T>.Null;
@@ -197,7 +197,7 @@ namespace ReorderableCollections
                 if (!_directory.TryGetValue(targetDestination, out destHandle)) return false;
             }
 
-            if (srcHandle.IsNull || destHandle.IsNull) return false;
+            if (srcHandle == null || destHandle == null || srcHandle.IsNull || destHandle.IsNull) return false;
 
             // Ordered lock acquisition keys to guarantee deadlock freedom
             long keySrc = (srcHandle.Segment.Id << 32) | (uint)srcHandle.SlotIndex;
@@ -224,20 +224,20 @@ namespace ReorderableCollections
                 var prevSrc = srcSlot.Prev;
                 var nextSrc = srcSlot.Next;
 
-                if (!prevSrc.IsNull) prevSrc.Segment._slots[prevSrc.SlotIndex].Next = nextSrc;
-                if (!nextSrc.IsNull) nextSrc.Segment._slots[nextSrc.SlotIndex].Prev = prevSrc;
+                if (prevSrc != null && !prevSrc.IsNull) prevSrc.Segment._slots[prevSrc.SlotIndex].Next = nextSrc;
+                if (nextSrc != null && !nextSrc.IsNull) nextSrc.Segment._slots[nextSrc.SlotIndex].Prev = prevSrc;
 
-                if (_logicalHead.Equals(srcHandle)) _logicalHead = nextSrc;
-                if (_logicalTail.Equals(srcHandle)) _logicalTail = prevSrc;
+                if (Equals(_logicalHead, srcHandle)) _logicalHead = nextSrc;
+                if (Equals(_logicalTail, srcHandle)) _logicalTail = prevSrc;
 
                 var prevDest = destSlot.Prev;
 
-                if (!prevDest.IsNull) prevDest.Segment._slots[prevDest.SlotIndex].Next = srcHandle;
+                if (prevDest != null && !prevDest.IsNull) prevDest.Segment._slots[prevDest.SlotIndex].Next = srcHandle;
                 srcSlot.Prev = prevDest;
                 srcSlot.Next = destHandle;
                 destSlot.Prev = srcHandle;
 
-                if (_logicalHead.Equals(destHandle)) _logicalHead = srcHandle;
+                if (Equals(_logicalHead, destHandle)) _logicalHead = srcHandle;
 
                 return true;
             }
@@ -250,8 +250,8 @@ namespace ReorderableCollections
 
         public IEnumerator<T> GetEnumerator()
         {
-            var current = _logicalHead;
-            while (!current.IsNull)
+            var current = Volatile.Read(ref _logicalHead);
+            while (current != null && !current.IsNull)
             {
                 var item = current.Segment._slots[current.SlotIndex].Item;
                 if (item != null) yield return item;

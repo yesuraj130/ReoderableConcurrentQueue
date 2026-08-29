@@ -5,7 +5,7 @@ using System.Threading;
 namespace ReorderableCollections
 {
     [StructLayout(LayoutKind.Sequential)]
-    internal struct IndexSlot<T>
+    internal struct IndexSlot<T> where T : class
     {
         public T Item;
         public SlotHandle<T> Next;
@@ -13,7 +13,7 @@ namespace ReorderableCollections
         public int State; // 0 = Free, 1 = Ready, 2 = LockedReorder, 3 = Claimed
     }
 
-    internal sealed class ReorderableSegment<T>
+    internal sealed class ReorderableSegment<T> where T : class
     {
         internal const int StateFree = 0;
         internal const int StateReady = 1;
@@ -22,6 +22,7 @@ namespace ReorderableCollections
 
         internal readonly long Id;
         internal readonly IndexSlot<T>[] _slots;
+        internal readonly SlotHandle<T>[] _handles;
         internal readonly int _mask;
         internal volatile ReorderableSegment<T> _nextSegment;
 
@@ -32,6 +33,11 @@ namespace ReorderableCollections
         {
             Id = id;
             _slots = new IndexSlot<T>[capacity];
+            _handles = new SlotHandle<T>[capacity];
+            for (int i = 0; i < capacity; i++)
+            {
+                _handles[i] = new SlotHandle<T>(this, i);
+            }
             _mask = capacity - 1;
         }
 
