@@ -1,0 +1,6 @@
+{
+  "name": "Reorderable Concurrent Queue Visualizer",
+  "description": "An interactive, high-fidelity playground and real-time visualizer for an advanced C# Reorderable Concurrent Queue.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
