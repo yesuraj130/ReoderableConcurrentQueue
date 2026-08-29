@@ -37,8 +37,8 @@ namespace ReorderableCollections
                 var cur = _headSegment;
                 while (cur != null)
                 {
-                    int head = Math.Max(0, Volatile.Read(ref cur._headIndex) + 1);
-                    int tail = Math.Min(cur.Capacity, Volatile.Read(ref cur._tailIndex) + 1);
+                    int head = Math.Max(0, Volatile.Read(ref cur._head.Value) + 1);
+                    int tail = Math.Min(cur.Capacity, Volatile.Read(ref cur._tail.Value) + 1);
                     if (tail > head)
                     {
                         for (int i = head; i < tail; i++)
@@ -62,8 +62,8 @@ namespace ReorderableCollections
             var cur = _headSegment;
             while (cur != null)
             {
-                int head = Math.Max(0, Volatile.Read(ref cur._headIndex) + 1);
-                int tail = Math.Min(cur.Capacity, Volatile.Read(ref cur._tailIndex) + 1);
+                int head = Math.Max(0, Volatile.Read(ref cur._head.Value) + 1);
+                int tail = Math.Min(cur.Capacity, Volatile.Read(ref cur._tail.Value) + 1);
                 for (int i = head; i < tail; i++)
                 {
                     if (Volatile.Read(ref cur._slots[i].Sequence) == ReorderableSegment<T>.StateReady)
@@ -90,7 +90,7 @@ namespace ReorderableCollections
             while (true)
             {
                 var tail = _tailSegment;
-                int slotIdx = Interlocked.Increment(ref tail._tailIndex);
+                int slotIdx = Interlocked.Increment(ref tail._tail.Value);
 
                 if (slotIdx < tail.Capacity)
                 {
@@ -136,8 +136,8 @@ namespace ReorderableCollections
             while (true)
             {
                 var headSeg = _headSegment;
-                int headIdx = Volatile.Read(ref headSeg._headIndex);
-                int tailIdx = Volatile.Read(ref headSeg._tailIndex);
+                int headIdx = Volatile.Read(ref headSeg._head.Value);
+                int tailIdx = Volatile.Read(ref headSeg._tail.Value);
 
                 if (headIdx >= tailIdx)
                 {
@@ -151,15 +151,28 @@ namespace ReorderableCollections
                     return false;
                 }
 
-                int slotIdx = Interlocked.Increment(ref headSeg._headIndex);
+                int slotIdx = Interlocked.Increment(ref headSeg._head.Value);
 
                 if (slotIdx < headSeg.Capacity)
                 {
                     if (slotIdx > tailIdx)
                     {
-                        while (Volatile.Read(ref headSeg._tailIndex) < slotIdx)
+                        while (Volatile.Read(ref headSeg._tail.Value) < slotIdx)
                         {
+                            if (headSeg._nextSegment != null && Volatile.Read(ref headSeg._tail.Value) < slotIdx)
+                            {
+                                // Producer has sealed this segment and moved to the next segment;
+                                // no more items will ever be enqueued at or beyond slotIdx here.
+                                var next = headSeg._nextSegment;
+                                _headSegment = next;
+                                break;
+                            }
                             spinner.SpinOnce();
+                        }
+
+                        if (_headSegment != headSeg)
+                        {
+                            continue;
                         }
                     }
 
@@ -188,17 +201,22 @@ namespace ReorderableCollections
                         return true;
                     }
 
-                    if (seq == ReorderableSegment<T>.StateFree)
+                    // Slot was not yet ready (StateFree) or was being reordered (StateLockedReorder)
+                    while (true)
                     {
-                        while (true)
+                        int currentSeq = Volatile.Read(ref slot.Sequence);
+                        if (currentSeq == ReorderableSegment<T>.StateClaimed)
                         {
-                            spinner.SpinOnce();
-                            seq = Interlocked.CompareExchange(
+                            // Already claimed by another operation or vacated
+                            break;
+                        }
+
+                        if (currentSeq == ReorderableSegment<T>.StateReady)
+                        {
+                            if (Interlocked.CompareExchange(
                                 ref slot.Sequence,
                                 ReorderableSegment<T>.StateClaimed,
-                                ReorderableSegment<T>.StateReady);
-
-                            if (seq == ReorderableSegment<T>.StateReady)
+                                ReorderableSegment<T>.StateReady) == ReorderableSegment<T>.StateReady)
                             {
                                 item = slot.Item;
                                 slot.Item = null;
@@ -214,27 +232,17 @@ namespace ReorderableCollections
 
                                 return true;
                             }
-
-                            if (seq == ReorderableSegment<T>.StateLockedReorder)
-                            {
-                                break;
-                            }
                         }
-                    }
 
-                    if (seq == ReorderableSegment<T>.StateLockedReorder)
-                    {
-                        while (Volatile.Read(ref slot.Sequence) == ReorderableSegment<T>.StateLockedReorder)
+                        if (headSeg._nextSegment != null && currentSeq == ReorderableSegment<T>.StateFree)
                         {
-                            spinner.SpinOnce();
+                            // If segment is sealed and slot is still Free, producer never filled it
+                            break;
                         }
-                        item = slot.Item;
-                        slot.Item = null;
-                        Volatile.Write(ref slot.Sequence, ReorderableSegment<T>.StateClaimed);
-                        return true;
+
+                        spinner.SpinOnce();
                     }
 
-                    spinner.SpinOnce();
                     continue;
                 }
                 else
@@ -271,7 +279,7 @@ namespace ReorderableCollections
                 var curSeg = _headSegment;
                 while (curSeg != null && (srcHandle.IsNull || destHandle.IsNull))
                 {
-                    int tailLimit = Math.Min(curSeg.Capacity, Volatile.Read(ref curSeg._tailIndex) + 1);
+                    int tailLimit = Math.Min(curSeg.Capacity, Volatile.Read(ref curSeg._tail.Value) + 1);
                     for (int i = 0; i < tailLimit; i++)
                     {
                         ref var slot = ref curSeg._slots[i];
@@ -344,7 +352,7 @@ namespace ReorderableCollections
             var curSeg = _headSegment;
             while (curSeg != null)
             {
-                int tailLimit = Math.Min(curSeg.Capacity, Volatile.Read(ref curSeg._tailIndex) + 1);
+                int tailLimit = Math.Min(curSeg.Capacity, Volatile.Read(ref curSeg._tail.Value) + 1);
                 for (int i = 0; i < tailLimit; i++)
                 {
                     var item = curSeg._slots[i].Item;

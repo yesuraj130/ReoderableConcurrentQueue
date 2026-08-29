@@ -12,6 +12,18 @@ namespace ReorderableCollections
         public int Sequence; // State: 0 = Free, 1 = Ready, 2 = LockedReorder, 3 = Claimed
     }
 
+    [StructLayout(LayoutKind.Explicit, Size = 64)]
+    internal struct PaddedHeadIndex
+    {
+        [FieldOffset(0)] internal int Value;
+    }
+
+    [StructLayout(LayoutKind.Explicit, Size = 64)]
+    internal struct PaddedTailIndex
+    {
+        [FieldOffset(0)] internal int Value;
+    }
+
     internal sealed class ReorderableSegment<T> where T : class
     {
         internal const int StateFree = 0;
@@ -24,18 +36,16 @@ namespace ReorderableCollections
         internal readonly int Capacity;
         internal volatile ReorderableSegment<T>? _nextSegment;
 
-        internal int _tailIndex = -1;
-
-        // Cache line padding (56 bytes) to isolate _tailIndex and _headIndex across cores
-        private long _pad0, _pad1, _pad2, _pad3, _pad4, _pad5, _pad6;
-
-        internal int _headIndex = -1;
+        internal PaddedTailIndex _tail;
+        internal PaddedHeadIndex _head;
 
         internal ReorderableSegment(long id, int capacity)
         {
             Id = id;
             Capacity = capacity;
             _slots = new IndexSlot<T>[capacity];
+            _tail.Value = -1;
+            _head.Value = -1;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
