@@ -7,7 +7,7 @@ namespace Benchmarks
     public sealed class QueueTaskItem : IHasSlotHandle<QueueTaskItem>
     {
         public int Id { get; }
-        public SlotHandle<QueueTaskItem> SlotHandle { get; set; }
+        public SlotHandle<QueueTaskItem>? SlotHandle { get; set; }
 
         public QueueTaskItem(int id)
         {

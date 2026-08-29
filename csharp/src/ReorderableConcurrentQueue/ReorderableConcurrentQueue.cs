@@ -77,7 +77,7 @@ namespace ReorderableCollections
             }
         }
 
-        public bool TryDequeue(out T item)
+        public bool TryDequeue(out T? item)
         {
             var spinner = new SpinWait();
 
@@ -167,7 +167,7 @@ namespace ReorderableCollections
             }
         }
 
-        private bool TryDequeueReordered(ReorderableSegment<T> segment, out T item)
+        private bool TryDequeueReordered(ReorderableSegment<T> segment, out T? item)
         {
             var spinner = new SpinWait();
             int tailLimit = Math.Min(segment.Capacity, Volatile.Read(ref segment._tailIndex) + 1);
@@ -225,8 +225,8 @@ namespace ReorderableCollections
             if (sourceItem == null || targetDestination == null || ReferenceEquals(sourceItem, targetDestination))
                 return false;
 
-            SlotHandle<T> srcHandle = null;
-            SlotHandle<T> destHandle = null;
+            SlotHandle<T>? srcHandle = null;
+            SlotHandle<T>? destHandle = null;
 
             if (s_isIntrusive)
             {

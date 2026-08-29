@@ -7,12 +7,12 @@ namespace ReorderableCollections
     [StructLayout(LayoutKind.Sequential)]
     internal struct IndexSlot<T> where T : class
     {
-        public T Item;
+        public T? Item;
         public int Sequence; // State / sequence: 0 = Free, 1 = Ready, 2 = LockedReorder, 3 = Claimed
         public int NextSlot; // -1 = natural (i + 1), >= 0 = explicit slot
-        public ReorderableSegment<T> NextSegment;
+        public ReorderableSegment<T>? NextSegment;
         public int PrevSlot; // -1 = natural (i - 1), >= 0 = explicit slot
-        public ReorderableSegment<T> PrevSegment;
+        public ReorderableSegment<T>? PrevSegment;
     }
 
     internal sealed class ReorderableSegment<T> where T : class
@@ -25,15 +25,15 @@ namespace ReorderableCollections
         internal readonly long Id;
         internal readonly IndexSlot<T>[] _slots;
         internal readonly int _mask;
-        internal volatile ReorderableSegment<T> _nextSegment;
-        internal volatile ReorderableSegment<T> _prevSegment;
+        internal volatile ReorderableSegment<T>? _nextSegment;
+        internal volatile ReorderableSegment<T>? _prevSegment;
 
         internal volatile bool _hasReordered;
         internal int _tailIndex = -1;
         internal int _headIndex = -1;
         private int _activeSlots;
 
-        private SlotHandle<T>[] _handles;
+        private SlotHandle<T>?[]? _handles;
 
         internal ReorderableSegment(long id, int capacity)
         {
@@ -63,9 +63,9 @@ namespace ReorderableCollections
             var handles = Volatile.Read(ref _handles);
             if (handles == null)
             {
-                var newHandles = new SlotHandle<T>[Capacity];
+                var newHandles = new SlotHandle<T>?[Capacity];
                 Interlocked.CompareExchange(ref _handles, newHandles, null);
-                handles = _handles;
+                handles = _handles!;
             }
 
             var h = handles[slotIdx];

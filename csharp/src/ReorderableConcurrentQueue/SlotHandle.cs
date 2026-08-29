@@ -13,16 +13,16 @@ namespace ReorderableCollections
             SlotIndex = slotIndex;
         }
 
-        public static SlotHandle<T> Null => null;
+        public static SlotHandle<T>? Null => null;
         public bool IsNull => Segment == null || SlotIndex < 0;
 
-        public bool Equals(SlotHandle<T> other)
+        public bool Equals(SlotHandle<T>? other)
         {
             if (ReferenceEquals(other, null)) return false;
             return ReferenceEquals(Segment, other.Segment) && SlotIndex == other.SlotIndex;
         }
 
-        public override bool Equals(object obj) =>
+        public override bool Equals(object? obj) =>
             obj is SlotHandle<T> other && Equals(other);
 
         public override int GetHashCode() =>
