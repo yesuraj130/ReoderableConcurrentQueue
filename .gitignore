@@ -6,3 +6,17 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# .NET and Visual Studio
+[Bb]in/
+[Oo]bj/
+*.dll
+*.exe
+*.pdb
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+.vs/
+BenchmarkDotNet.Artifacts/
+

@@ -7,7 +7,7 @@ namespace Benchmarks
     public sealed class QueueTaskItem : IHasSlotHandle<QueueTaskItem>
     {
         public int Id { get; }
-        public SlotHandle<QueueTaskItem>? SlotHandle { get; set; }
+        public SlotHandle<QueueTaskItem> SlotHandle { get; set; }
 
         public QueueTaskItem(int id)
         {
@@ -18,13 +18,13 @@ namespace Benchmarks
     [MemoryDiagnoser]
     public class QueueBenchmarks
     {
-        private ConcurrentQueue<QueueTaskItem> _stdQueue;
-        private ReorderableConcurrentQueue<QueueTaskItem> _reorderQueue;
-        private QueueTaskItem[] _testItems;
+        private ConcurrentQueue<QueueTaskItem> _stdQueue = default!;
+        private ReorderableConcurrentQueue<QueueTaskItem> _reorderQueue = default!;
+        private QueueTaskItem[] _testItems = default!;
 
-        private ConcurrentQueue<string> _stdStringQueue;
-        private ReorderableConcurrentQueue<string> _reorderStringQueue;
-        private string[] _testStrings;
+        private ConcurrentQueue<string> _stdStringQueue = default!;
+        private ReorderableConcurrentQueue<string> _reorderStringQueue = default!;
+        private string[] _testStrings = default!;
 
         [Params(1000, 10000)]
         public int OperationsCount;
