@@ -57,6 +57,13 @@ namespace ReorderableCollections
 
         public bool IsEmpty => !TryPeek(out _);
 
+        public void Clear()
+        {
+            var newSeg = new ReorderableSegment<T>(Interlocked.Increment(ref s_segmentIdCounter), InitialSegmentSize);
+            _headSegment = newSeg;
+            _tailSegment = newSeg;
+        }
+
         public bool TryPeek(out T? result)
         {
             var cur = _headSegment;
@@ -189,6 +196,11 @@ namespace ReorderableCollections
                         item = slot.Item;
                         slot.Item = null;
 
+                        if (s_isIntrusive && item != null)
+                        {
+                            Unsafe.As<IHasSlotHandle<T>>(item).SlotHandle = SlotHandle<T>.Null;
+                        }
+
                         if (slotIdx == headSeg.Capacity - 1)
                         {
                             var next = headSeg._nextSegment;
@@ -220,6 +232,11 @@ namespace ReorderableCollections
                             {
                                 item = slot.Item;
                                 slot.Item = null;
+
+                                if (s_isIntrusive && item != null)
+                                {
+                                    Unsafe.As<IHasSlotHandle<T>>(item).SlotHandle = SlotHandle<T>.Null;
+                                }
 
                                 if (slotIdx == headSeg.Capacity - 1)
                                 {
@@ -260,6 +277,29 @@ namespace ReorderableCollections
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool TryLockForReorder(ref IndexSlot<T> first, ref IndexSlot<T> second)
+        {
+            if (Interlocked.CompareExchange(
+                    ref first.Sequence,
+                    ReorderableSegment<T>.StateLockedReorder,
+                    ReorderableSegment<T>.StateReady) != ReorderableSegment<T>.StateReady)
+            {
+                return false;
+            }
+
+            if (Interlocked.CompareExchange(
+                    ref second.Sequence,
+                    ReorderableSegment<T>.StateLockedReorder,
+                    ReorderableSegment<T>.StateReady) != ReorderableSegment<T>.StateReady)
+            {
+                Volatile.Write(ref first.Sequence, ReorderableSegment<T>.StateReady);
+                return false;
+            }
+
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool TryMoveBefore(T sourceItem, T targetDestination)
         {
             if (sourceItem == null || targetDestination == null || ReferenceEquals(sourceItem, targetDestination))
@@ -283,15 +323,19 @@ namespace ReorderableCollections
                     for (int i = 0; i < tailLimit; i++)
                     {
                         ref var slot = ref curSeg._slots[i];
-                        if (slot.Item != null && Volatile.Read(ref slot.Sequence) == ReorderableSegment<T>.StateReady)
+                        if (Volatile.Read(ref slot.Sequence) == ReorderableSegment<T>.StateReady)
                         {
-                            if (srcHandle.IsNull && ReferenceEquals(slot.Item, sourceItem))
+                            var item = slot.Item;
+                            if (item != null)
                             {
-                                srcHandle = curSeg.GetHandle(i);
-                            }
-                            else if (destHandle.IsNull && ReferenceEquals(slot.Item, targetDestination))
-                            {
-                                destHandle = curSeg.GetHandle(i);
+                                if (srcHandle.IsNull && ReferenceEquals(item, sourceItem))
+                                {
+                                    srcHandle = curSeg.GetHandle(i);
+                                }
+                                else if (destHandle.IsNull && ReferenceEquals(item, targetDestination))
+                                {
+                                    destHandle = curSeg.GetHandle(i);
+                                }
                             }
                         }
                     }
@@ -305,46 +349,59 @@ namespace ReorderableCollections
             long srcSeq = (srcHandle.Segment.Id << 32) | (uint)srcHandle.SlotIndex;
             long destSeq = (destHandle.Segment.Id << 32) | (uint)destHandle.SlotIndex;
 
-            // If source is already scheduled to dequeue before destination, condition is satisfied
-            if (srcSeq < destSeq)
-                return true;
-
             ref var srcSlot = ref srcHandle.Segment._slots[srcHandle.SlotIndex];
             ref var destSlot = ref destHandle.Segment._slots[destHandle.SlotIndex];
+
+            // If source is already scheduled to dequeue before destination, verify it is still actively ready
+            if (srcSeq < destSeq)
+            {
+                if (Volatile.Read(ref srcSlot.Sequence) == ReorderableSegment<T>.StateReady &&
+                    Volatile.Read(ref destSlot.Sequence) == ReorderableSegment<T>.StateReady &&
+                    ReferenceEquals(srcSlot.Item, sourceItem) &&
+                    ReferenceEquals(destSlot.Item, targetDestination))
+                {
+                    return true;
+                }
+            }
 
             ref var firstSlot = ref (srcSeq < destSeq ? ref srcSlot : ref destSlot);
             ref var secondSlot = ref (srcSeq < destSeq ? ref destSlot : ref srcSlot);
 
-            if (Interlocked.CompareExchange(ref firstSlot.Sequence, ReorderableSegment<T>.StateLockedReorder, ReorderableSegment<T>.StateReady) != ReorderableSegment<T>.StateReady)
+            if (!TryLockForReorder(ref firstSlot, ref secondSlot))
                 return false;
 
-            if (Interlocked.CompareExchange(ref secondSlot.Sequence, ReorderableSegment<T>.StateLockedReorder, ReorderableSegment<T>.StateReady) != ReorderableSegment<T>.StateReady)
+            try
             {
-                Volatile.Write(ref firstSlot.Sequence, ReorderableSegment<T>.StateReady);
-                return false;
-            }
+                if (!ReferenceEquals(srcSlot.Item, sourceItem) || !ReferenceEquals(destSlot.Item, targetDestination))
+                    return false;
 
-            if (!ReferenceEquals(srcSlot.Item, sourceItem) || !ReferenceEquals(destSlot.Item, targetDestination))
+                if (s_isIntrusive)
+                {
+                    if (Unsafe.As<IHasSlotHandle<T>>(sourceItem).SlotHandle != srcHandle ||
+                        Unsafe.As<IHasSlotHandle<T>>(targetDestination).SlotHandle != destHandle)
+                    {
+                        return false;
+                    }
+                }
+
+                // Swap items in slots
+                srcSlot.Item = targetDestination;
+                destSlot.Item = sourceItem;
+
+                // Swap handles for intrusive items
+                if (s_isIntrusive)
+                {
+                    Unsafe.As<IHasSlotHandle<T>>(sourceItem).SlotHandle = destHandle;
+                    Unsafe.As<IHasSlotHandle<T>>(targetDestination).SlotHandle = srcHandle;
+                }
+
+                return true;
+            }
+            finally
             {
                 Volatile.Write(ref secondSlot.Sequence, ReorderableSegment<T>.StateReady);
                 Volatile.Write(ref firstSlot.Sequence, ReorderableSegment<T>.StateReady);
-                return false;
             }
-
-            // Swap items in slots
-            srcSlot.Item = targetDestination;
-            destSlot.Item = sourceItem;
-
-            // Swap handles for intrusive items
-            if (s_isIntrusive)
-            {
-                Unsafe.As<IHasSlotHandle<T>>(sourceItem).SlotHandle = destHandle;
-                Unsafe.As<IHasSlotHandle<T>>(targetDestination).SlotHandle = srcHandle;
-            }
-
-            Volatile.Write(ref secondSlot.Sequence, ReorderableSegment<T>.StateReady);
-            Volatile.Write(ref firstSlot.Sequence, ReorderableSegment<T>.StateReady);
-            return true;
         }
 
         public IEnumerator<T> GetEnumerator()
@@ -355,10 +412,13 @@ namespace ReorderableCollections
                 int tailLimit = Math.Min(curSeg.Capacity, Volatile.Read(ref curSeg._tail.Value) + 1);
                 for (int i = 0; i < tailLimit; i++)
                 {
-                    var item = curSeg._slots[i].Item;
-                    if (item != null && Volatile.Read(ref curSeg._slots[i].Sequence) == ReorderableSegment<T>.StateReady)
+                    if (Volatile.Read(ref curSeg._slots[i].Sequence) == ReorderableSegment<T>.StateReady)
                     {
-                        yield return item;
+                        var item = curSeg._slots[i].Item;
+                        if (item != null)
+                        {
+                            yield return item;
+                        }
                     }
                 }
                 curSeg = curSeg._nextSegment;
