@@ -31,6 +31,31 @@ jobs:
       run: |
         dotnet run -c Release --framework net6.0 --project csharp/benchmarks/ReorderableConcurrentQueue.Benchmarks/ReorderableConcurrentQueue.Benchmarks.csproj -- --filter "*" --join
 
+    - name: Extract and Upload Benchmark Result Table (net6.0)
+      if: always()
+      run: |
+        mkdir -p ./artifacts
+        # Find the generated BenchmarkDotNet markdown result file (-github.md)
+        MD_FILE=$(find ./BenchmarkDotNet.Artifacts/results -name "*report-github.md" -o -name "*-report-github.md" | head -n 1)
+        if [ -f "$MD_FILE" ]; then
+          # Extract only the markdown table (lines matching '|' and header separator)
+          grep '^|' "$MD_FILE" > ./artifacts/benchmark-net60-summary.md
+        else
+          # Fallback if standard markdown report path
+          find ./BenchmarkDotNet.Artifacts/results -name "*.md" -exec grep '^|' {} + > ./artifacts/benchmark-net60-summary.md || true
+        fi
+        # Also append to GitHub Step Summary if available
+        if [ -f "./artifacts/benchmark-net60-summary.md" ] && [ -n "$GITHUB_STEP_SUMMARY" ]; then
+          cat ./artifacts/benchmark-net60-summary.md >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: Upload Benchmark Table Artifact (net6.0)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results-net60
+        path: ./artifacts/benchmark-net60-summary.md
+
   # Job 2: Benchmark Suite for Legacy .NET Framework 4.8
   benchmark_net48:
     name: Run .NET 4.8 Benchmarks (Windows Server)
@@ -58,3 +83,31 @@ jobs:
     - name: Execute .NET Framework 4.8 Benchmarks
       run: |
         dotnet run -c Release --framework net48 --project csharp/benchmarks/ReorderableConcurrentQueue.Benchmarks/ReorderableConcurrentQueue.Benchmarks.csproj -- --filter "*" --join
+
+    - name: Extract and Upload Benchmark Result Table (net48)
+      if: always()
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path ./artifacts
+        $mdFiles = Get-ChildItem -Path ./BenchmarkDotNet.Artifacts/results -Filter "*report-github.md" -Recurse
+        if ($mdFiles.Count -gt 0) {
+            $tableLines = Get-Content $mdFiles[0].FullName | Where-Object { $_ -match '^\|' }
+            $tableLines | Set-Content -Path ./artifacts/benchmark-net48-summary.md
+        } else {
+            $allMd = Get-ChildItem -Path ./BenchmarkDotNet.Artifacts/results -Filter "*.md" -Recurse
+            if ($allMd.Count -gt 0) {
+                Get-Content $allMd[0].FullName | Where-Object { $_ -match '^\|' } | Set-Content -Path ./artifacts/benchmark-net48-summary.md
+            }
+        }
+        if (Test-Path ./artifacts/benchmark-net48-summary.md) {
+            if ($env:GITHUB_STEP_SUMMARY) {
+                Get-Content ./artifacts/benchmark-net48-summary.md | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            }
+        }
+
+    - name: Upload Benchmark Table Artifact (net48)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results-net48
+        path: ./artifacts/benchmark-net48-summary.md
